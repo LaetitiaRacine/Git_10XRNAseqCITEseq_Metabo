@@ -1,0 +1,220 @@
+---
+title: "Create_SeuratObject"
+author: "Laëtitia"
+date: "06/12/2021"
+output:  
+  html_document : 
+      theme : journal
+      highlight : default
+      toc : yes 
+      toc_depth : 4
+      number_sections : no
+      code_folding : show
+editor_options: 
+  chunk_output_type: inline
+---
+<style>
+body {text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(collapse = TRUE)
+# à mettre en commentaire quand on veut lancer tous les chunks
+# lignes permettant de faire le knitr sans recréer tous les objets
+# knitr::opts_chunk$set(eval = FALSE)
+```
+
+```{r, libraries, eval=TRUE, message=FALSE, warning=FALSE}
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(ggplot2)
+```
+
+```{r manual_dir, eval=TRUE}
+
+# Output directories
+dir = "/home/rparmentier/Documents/Git_10XRNAseqCITEseq_Metabo/"
+currentDate <- paste0(substr(Sys.Date(), 1,4), substr(Sys.Date(),6,7), substr(Sys.Date(),9, 10))
+dir.create(path = paste0(dir, "exp/", currentDate))
+dir_output = paste0(dir, "exp/", currentDate, "/Create_SeuratObject/")
+dir.create(path = dir_output)
+
+# Input directories
+dir_CTRL = paste0(dir, "data/CTRL/sample_feature_bc_matrix/")
+dir_DON = paste0(dir, "data/DON/sample_feature_bc_matrix/")
+dir_2DG = paste0(dir, "data/2DG/sample_feature_bc_matrix/")
+dir_CTRLaK = paste0(dir, "data/CTRLaK/sample_feature_bc_matrix/")
+dir_DONaK = paste0(dir, "data/DONaK/sample_feature_bc_matrix/")
+dir_2DGaK = paste0(dir, "data/2DGaK/sample_feature_bc_matrix/")
+dir_VPA = paste0(dir, "data/VPA/sample_feature_bc_matrix/")
+list_antibody = c("CD34.1","CD133")
+
+```
+
+```{r include=FALSE, eval=TRUE}
+# à mettre en commentaire quand on veut lancer tous les chunks
+# lignes permettant de faire le knitr sans recréer tous les objets
+# data_CTRL = readRDS(paste0(dir_output, "data_CTRL.rds"))
+# data_DON = readRDS(paste0(dir_output, "data_DON.rds"))
+# data_2DG = readRDS(paste0(dir_output, "data_2DG.rds"))
+# data_CTRLaK = readRDS(paste0(dir_output, "data_CTRLaK.rds"))
+# data_DONaK = readRDS(paste0(dir_output, "data_DONaK.rds"))
+# data_2DGaK = readRDS(paste0(dir_output, "data_2DGaK.rds"))
+# data_VPA = readRDS(paste0(dir_output, "data_VPA.rds"))
+# merge_allcond  = readRDS(paste0(dir_output, "data_allcond.rds"))
+```
+
+
+<!--*************************************************************************-->
+<br><br><br>
+<!--*************************************************************************-->
+
+# Objectif du code 
+
+Ce code **permet de** :  
+- créer les matrices de count à partir des trois fichiers issus de CellRanger  
+- mettre les matrices de count au format Seurat Object pour chaque condition   
+- enregistrer les objets Seurat individuel  
+- fusionner les objets Seurat pour obtenir un seul objet contenant tout le dataset  
+- calculer les métriques QC (pourcentage d'ARN mitochondrial et ribosomal) pour l'objet Seurat global  
+- enregistrer l'objet Seurat global  
+  
+Il s'est **inspiré** de :   
+- https://satijalab.org/seurat/articles/multimodal_vignette.html  
+- https://satijalab.org/seurat/articles/pbmc3k_tutorial.html   
+- https://nbisweden.github.io/workshop-scRNAseq/labs/compiled/seurat/seurat_01_qc.html   
+  
+On obtient **en sortie** un objet Seurat par condition et un objet Seurat pour le dataset. Un objet Seurat sert de conteneurs qui regroupent à la fois les données (comme les matrices de counts) mais aussi les analyses (comme les PCA ou clustering) d'un même *single-cell dataset*. Il contient plusieurs *Assays* selon le type de données : ARN, Protéine (ADT), Normalisation... On retrouve la matrice de *counts* pour chaque assay indiquant les features (= gènes de la base de données GRCh38) en ligne et les cellules identifiées par leur barcode en colonnes. Les commandes principales pour manipuler un objet Seurat sont indiquées dans la vignette : https://satijalab.org/seurat/articles/essential_commands.html. 
+
+*NB : Il serait possible d'appliquer un filtre sur le nombre d'UMI nécessaire par gène pour qu'il ne soit pas considéré comme du bruit de fond ou alors sur le nombre de cellules devant exprimer le gène pour qu'on le conserve mais on a décidé de ne pas le faire pour le moment. Cela évite d'enlever trop d'informations dès le début. Il sera toujours possible d'appliquer ce genre de filtre par la suite si on se rend compte que les données sont biaisées.*
+
+
+<!--*************************************************************************-->
+<br><br><br>
+<!--*************************************************************************-->
+
+
+# Création des objets Seurat avec les matrices CellRanger et filtre sur jeu de donnée individuel
+
+On travaille ici à partir du dossier envoyé par la plateforme de Cochin, contenant les fichiers traités via CellRanger. Pour chaque échantillon, on dispose d'un dossier contenant les informations nécessaires à la création des matrices de *count*. Elles sont stockées dans : [nom échantillon]/outs/per_sample_outs/sample[1ou2]/count. 
+  
+  
+**Fonction de création des objets**
+```{r function}
+Seurat_ADT_RNA = function(dir, list_antibody, name_project) {
+  
+  # Liste des cellules détectées (deux tableaux avec la même info : idem sample_barcodes.csv)
+  cells = read.csv(paste0(dir, "barcodes.tsv.gz"), 
+                   header = FALSE, col.names = "barcode")
+  
+  # Liste des features : gènes ou anticorps CITEseq ou Hashtag
+  features = read.csv(paste0(dir, "features.tsv.gz"), 
+                      sep = "\t", header = FALSE, col.names = c("id_gene", "name", "analysis"))
+  features_antibody = features %>% dplyr::filter(analysis == "Antibody Capture")
+  features_gene = features %>% dplyr::filter(analysis == "Gene Expression")
+  list_gene = features_gene$name
+  
+  # Association gène/transcrit et antibody/transcript
+  matrix = as.sparse(ReadMtx(mtx = paste0(dir, "matrix.mtx.gz"),
+                             cells = paste0(dir, "barcodes.tsv.gz"),
+                             features = paste0(dir, "features.tsv.gz")))
+  
+  # Séparation des matrices
+  tab_matrix = as.data.frame(matrix)
+  tab_antibody = tab_matrix %>% dplyr::filter(row.names(tab_matrix) %in% list_antibody)
+  tab_genes = tab_matrix %>% dplyr::filter(row.names(tab_matrix) %in% list_gene)
+  
+  # Création d'un Seurat Object
+  data = CreateSeuratObject(counts = tab_genes, 
+                            project = name_project)
+  # create a new assay to store ADT information
+  adt_assay = CreateAssayObject(counts = tab_antibody)
+  # Ajout du nouvel assay dans data
+  data[["ADT"]] = adt_assay
+  
+  return(data)
+}
+```
+Pour que le gène (assay = RNA) puisse être différencié facilement de la protéine (assay = ADT) pour le CD34, la détection de la protéine est indiquée sous le nom CD34.1. Pour le CD133, on n'a pas ce problème car le gène associé au CD133 porte un autre nom : PROM1. 
+  
+  
+**Appel de la fonction pour créer des objets individuels**
+```{r, individual_Seurat}
+data_CTRL = Seurat_ADT_RNA(dir_CTRL, list_antibody, "CTRL")
+data_DON = Seurat_ADT_RNA(dir_DON, list_antibody, "DON")
+data_2DG = Seurat_ADT_RNA(dir_2DG, list_antibody, "2DG")
+data_CTRLaK = Seurat_ADT_RNA(dir_CTRLaK, list_antibody, "CTRLaK")
+data_DONaK = Seurat_ADT_RNA(dir_DONaK, list_antibody, "DONaK")
+data_2DGaK = Seurat_ADT_RNA(dir_2DGaK, list_antibody, "2DGaK")
+data_VPA = Seurat_ADT_RNA(dir_VPA, list_antibody, "VPA")
+```
+  
+  
+**Vérification des objets : nombre d'assays et liste des anticorps CITEseq**  
+```{r check_obj, eval=TRUE}
+#Vérifier qu'il y a bien deux assays dans chaque objet
+Assays(data_CTRL) 
+Assays(data_CTRLaK)
+Assays(data_DON)
+Assays(data_DONaK)
+Assays(data_2DG)
+Assays(data_2DGaK)
+Assays(data_VPA)
+# Extraire la liste des anticorps CITEseq pour chaque objet
+rownames(data_CTRL[["ADT"]])
+rownames(data_CTRLaK[["ADT"]])
+rownames(data_DON[["ADT"]])
+rownames(data_DONaK[["ADT"]])
+rownames(data_2DG[["ADT"]])
+rownames(data_2DGaK[["ADT"]])
+rownames(data_VPA[["ADT"]])
+```
+  
+  
+**Enregistrement des objets individuels** (facultatif)  
+```{r save_indObj}
+saveRDS(data_CTRL, file = paste0(dir_output, "data_CTRL.rds"))
+saveRDS(data_DON, file = paste0(dir_output, "data_DON.rds"))
+saveRDS(data_2DG, file = paste0(dir_output, "data_2DG.rds"))
+saveRDS(data_CTRLaK, file = paste0(dir_output, "data_CTRLaK.rds"))
+saveRDS(data_DONaK, file = paste0(dir_output, "data_DONaK.rds"))
+saveRDS(data_2DGaK, file = paste0(dir_output, "data_2DGaK.rds"))
+saveRDS(data_VPA, file = paste0(dir_output, "data_VPA.rds"))
+```
+  
+  
+**Fusion des objets Seurat pour obtenir un objet global pour tout le dataset et calcul des QC**
+```{r merge}
+# Regroupement des objets individuels
+merge_allcond = merge(x = data_CTRL, 
+                      y = list(data_DON, data_2DG, data_CTRLaK, data_DONaK, data_2DGaK, data_VPA),
+                      project = "10XMetabo_RNAseq-CITEseq")
+```
+
+```{r eval=TRUE}
+# Extraction de la liste des gènes mitochondriaux et ribosomaux
+mito_genes = rownames(merge_allcond)[grep("^MT-", rownames(merge_allcond))]
+ribo_genes <- rownames(merge_allcond)[grep("^RP[SL]", rownames(merge_allcond))]
+print(mito_genes)
+print(ribo_genes)
+
+# Calcul des pourcentages et ajout à l'objet Seurat
+merge_allcond[["percent.mt"]] <- PercentageFeatureSet(merge_allcond, pattern = "^MT-")
+merge_allcond[["percent.ribo"]] <- PercentageFeatureSet(merge_allcond, pattern = "^RP[SL]")
+```
+
+  
+**Enregistrement de l'objet Seurat du dataset**
+```{r save_globObj}
+saveRDS(merge_allcond, file = paste0(dir_output, "data_allcond.rds"))
+```
+
+```{r, include = FALSE}
+rm(data_CTRL, data_DON, data_2DG, data_CTRLaK, data_2DGaK, data_VPA, data_DONaK)
+rm(dir_CTRL, dir_CTRLaK, dir_DON, dir_2DG, dir_2DGaK, dir_DONaK, dir_VPA, dir_data, list_antibody, mito_genes, ribo_genes)
+rm(currentDate, dir_output, Seurat_ADT_RNA)
+```
+
