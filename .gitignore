@@ -1,0 +1,10 @@
+# Ignore input data files except .gitkeep
+data/*
+!data/.gitkeep
+
+# Ignore output data files except .gitkeep
+exp/*
+!exp/.gitkeep
+
+# Ignore .Rhistory
+.Rhistory
